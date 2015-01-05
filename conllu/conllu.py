@@ -26,7 +26,7 @@ class FormatError(Exception):
         return msg
 
 CPOSTAG_RE = re.compile(r'^[a-zA-Z]+$')
-POSTAG_RE = re.compile(r'^[a-zA-Z]+$')
+POSTAG_RE = re.compile(r'^[\x20-\xff]+$')
 
 class Element(object):
     def __init__(self, id_, form, lemma, cpostag, postag,
@@ -54,7 +54,7 @@ class Element(object):
         if not CPOSTAG_RE.match(self.cpostag):
             raise FormatError('invalid CPOSTAG: %s' % self.cpostag)
         if not POSTAG_RE.match(self.postag):
-            raise FormatError('invalid CPOSTAG: %s' % self.postag)
+            raise FormatError('invalid POSTAG: %s' % self.postag)
 
         # no feature is empty
         if any(True for s in self._feats if len(s) == 0):
