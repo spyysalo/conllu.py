@@ -3,6 +3,7 @@
 # CoNLL-U format support
 
 import re
+import codecs
 
 from itertools import groupby
 
@@ -20,7 +21,7 @@ class FormatError(Exception):
     def __str__(self):        
         msg = self.msg
         if self.line is not None:
-            msg += ' "'+self.line.encode('ascii', 'replace')+'"'
+            msg += ': "'+self.line.encode('ascii', 'replace')+'"'
         if self.linenum is not None:
             msg += ' (line %d)' % self.linenum
         return msg
@@ -49,6 +50,10 @@ class Element(object):
 
     def validate(self):
         # minimal format validation (incomplete)
+
+        if not self.is_word():
+            # TODO: check multi-word tokens
+            return
 
         # some character set constraints
         if not CPOSTAG_RE.match(self.cpostag):
@@ -164,7 +169,7 @@ class Element(object):
     def from_string(cls, s):
         fields = s.split('\t')
         if len(fields) != 10:
-            raise FormatError('%d fields' % len(fields), s)
+            raise FormatError('got %d/10 field(s)' % len(fields), s)
         fields[5] = [] if fields[5] == '_' else fields[5].split('|') # feats
         fields[8] = [] if fields[8] == '_' else fields[8].split('|') # deps
         return cls(*fields)
@@ -245,6 +250,11 @@ def read_conllu(f):
 
     Note: incomplete implementation, lacks validation.'''
 
+    if isinstance(f, basestring):
+        with codecs.open(f, encoding='utf-8') as i:
+            for s in read_conllu(i):
+                yield s
+        return
 
     current = Sentence()
 
