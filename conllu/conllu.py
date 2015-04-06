@@ -30,8 +30,10 @@ CPOSTAG_RE = re.compile(r'^[a-zA-Z]+$')
 POSTAG_RE = re.compile(r'^[\x20-\xff]+$')
 
 class Element(object):
+    """Represents CoNLL-U word or multi-word token."""
+
     def __init__(self, id_, form, lemma, cpostag, postag,
-                 feats, head, deprel, deps, misc):
+                 feats, head, deprel, deps, misc, offset=0):
         self.id = id_
         self.form = form
         self.lemma = lemma
@@ -42,6 +44,9 @@ class Element(object):
         self.deprel = deprel
         self._deps = deps
         self.misc = misc
+
+        self.offset = 0
+        self.sentence = None
 
         self.validate()
 
@@ -175,23 +180,43 @@ class Element(object):
         return cls(*fields)
 
 class Sentence(object):
-    def __init__(self):
+    def __init__(self, filename=None, base_offset=0):
+        """Initialize a new, empty Sentence."""
         self.comments = []
         self._elements = []
-
+        self.filename = filename
+        self.base_offset = base_offset
+        # mapping from IDs to elements
         self._element_by_id = None
 
     def append(self, element):
+        """Append word or multi-word token to sentence."""
         self._elements.append(element)
+        assert element.sentence is None, 'element in multiple sentences?'
+        element.sentence = self
+        # reset cache (TODO: extend instead)
         self._element_by_id = None
 
     def empty(self):
         return self._elements == []
 
     def words(self):
+        """Return a list of the words in the sentence."""
         return [e for e in self._elements if e.is_word()]
 
+    def text(self, use_tokens=False, separator=' '):
+        """Return the text of the sentence."""
+        if use_tokens:
+            raise NotImplementedError('multi-word token text not supported.')
+        else:
+            return separator.join(w.form for w in self.words())
+
+    def length(self, use_tokens=False):
+        """Return the length of the sentence text."""
+        return len(self.text(use_tokens))
+
     def get_element(self, id_):
+        """Return element by id."""
         if self._element_by_id is None:
             self._element_by_id = { e.id: e for e in self._elements }
         return self._element_by_id[id_]
@@ -241,31 +266,57 @@ class Sentence(object):
                     deps.append((w.id, deprel))
         return deps
 
+    def assign_offsets(self, use_tokens=False):
+        """Assign offsets to sentence elements."""
+        offset = self.base_offset
+        if use_tokens:
+            raise NotImplementedError('multi-word token text not supported.')
+        else:
+            # Words are separated by a single character and multi-word
+            # tokens appear at the start of the position of their
+            # initial words with zero-width spans.
+            for e in self._elements:
+                e.offset = offset
+                if e.is_word():
+                    offset += len(e.form) + 1
+
     def __unicode__(self):
         element_unicode = [unicode(e) for e in self._elements]
         return '\n'.join(self.comments + element_unicode)+'\n'
 
-def read_conllu(f):
+def read_conllu(source, filename=None):
     '''Read CoNLL-U format, yielding Sentence objects.
 
     Note: incomplete implementation, lacks validation.'''
 
-    if isinstance(f, basestring):
-        with codecs.open(f, encoding='utf-8') as i:
-            for s in read_conllu(i):
+    # If given a string, assume it's a file name, open and recurse.
+    if isinstance(source, basestring):
+        with codecs.open(source, encoding='utf-8') as i:
+            for s in read_conllu(i, filename=source):
                 yield s
         return
 
-    current = Sentence()
+    # If no filename is provided, attempt to determine from source and
+    # fall back to a default.
+    if filename is None:
+        try:
+            filename = source.name
+        except AttributeError:
+            filename = '<unknown>'
 
-    for ln, line in enumerate(f):
+    # TODO: recognize and respect document boundaries in source data.
+    offset = 0
+    current = Sentence(filename, offset)
+    for ln, line in enumerate(source):
         line = line.rstrip('\n')
         if not line:
             if not current.empty():
+                # Assume single character sentence separator.
+                offset += current.length() + 1
                 yield current
             else:
                 raise FormatError('empty sentence', line, ln+1)
-            current = Sentence()
+            current = Sentence(filename, offset)
         elif line[0] == '#':
             current.comments.append(line)
         else:
@@ -274,4 +325,4 @@ def read_conllu(f):
             except FormatError, e:
                 e.linenum = ln+1
                 raise e
-    assert current.empty()
+    assert current.empty(), 'missing terminating whitespace'
