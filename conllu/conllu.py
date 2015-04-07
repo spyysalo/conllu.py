@@ -5,12 +5,17 @@
 import re
 import codecs
 
+import brat
+
 from itertools import groupby
 
 # feature name-value separator
 FSEP = '='
 # dependency head-rel separator
 DSEP = ':'
+
+# Free-form text annotation type in brat export
+COMMENT_TYPE = 'AnnotatorNotes'
 
 class FormatError(Exception):
     def __init__(self, msg, line=None, linenum=None):
@@ -45,7 +50,7 @@ class Element(object):
         self._deps = deps
         self.misc = misc
 
-        self.offset = 0
+        self.offset = offset
         self.sentence = None
 
         self.validate()
@@ -128,6 +133,9 @@ class Element(object):
                 raise ValueError('failed to convert ' + str(self._feats))
         return self._fmap
 
+    def feats(self):
+        return self.feat_map().items()
+
     def deps(self, include_primary=False):
         if self._dlist is None:
             try:
@@ -163,6 +171,60 @@ class Element(object):
         self._deps = '_'
         self.misc = '_'
 
+    def to_brat_standoff(self, element_by_id):
+        """Return list of brat standoff annotations for the element."""
+        # base ID, unique within the document
+        bid = '%s.%s' % (self.sentence.id, self.id)
+        if self.is_word():
+            # Word, maps to: Textbound with the coarse POS tag as
+            # type, freeform text comment with LEMMA, POSTAG and
+            # MISC (when nonempty) as values, attribute for each
+            # feature.
+            # textbounds
+            spans = [[self.offset, self.offset+len(self.form)]]
+            textbounds = [
+                brat.Textbound('T'+bid, self.cpostag, spans, self.form),
+            ]
+            # comments
+            freeform = [
+                ('LEMMA', self.lemma),
+                ('POSTAG', self.postag),
+            ]
+            if self.misc != '_':
+                freeform.append(('MISC', self.misc))
+            comments = [
+                brat.Comment('#'+bid, COMMENT_TYPE, 'T'+bid,
+                             ' '.join(u'%s=%s' % f for f in freeform))
+            ]
+            # attributes
+            attribs = []
+            for name, value in self.feats():
+                aid = 'A'+bid+'-%d'%(len(attribs)+1)
+                attribs.append(brat.Attribute(aid, name, 'T'+bid, value))
+            # relations
+            relations = []
+            for head, deprel in self.deps(include_primary=True):
+                if head == '0':
+                    continue # skip root
+                rid = 'R'+bid+'-%d'%(len(relations)+1)
+                tid = '%s.%s' % (self.sentence.id, element_by_id[head].id)
+                args = [('Arg1', 'T'+tid), ('Arg2', 'T'+bid)]
+                relations.append(brat.Relation(rid, deprel, args))
+            return textbounds + attribs + relations + comments
+        else:
+            # Multi-word token, maps to: Textbound with a special type,
+            # and free-text comment containing the form.
+            # Span corresponds to maximum span over covered tokens.
+            start, end = self.id.split('-')
+            first, last = element_by_id[start], element_by_id[end]
+            spans = [[first.offset, last.offset+len(last.form)]]
+            text  = ' '.join(str(element_by_id[str(t)].form)
+                              for t in range(int(start), int(end)+1))
+            return [
+                brat.Textbound('T'+bid, 'Multiword-token', spans, text),
+                brat.Comment('#'+bid, COMMENT_TYPE, 'T'+bid, 'FORM='+self.form)
+            ]
+
     def __unicode__(self):
         fields = [self.id, self.form, self.lemma, self.cpostag, self.postag, 
                   self._feats, self.head, self.deprel, self._deps, self.misc]
@@ -180,12 +242,14 @@ class Element(object):
         return cls(*fields)
 
 class Sentence(object):
-    def __init__(self, filename=None, base_offset=0):
+    def __init__(self, id_=0, filename=None, base_offset=0):
         """Initialize a new, empty Sentence."""
         self.comments = []
         self._elements = []
+        self.id = id_
         self.filename = filename
         self.base_offset = base_offset
+        self.next_offset = base_offset
         # mapping from IDs to elements
         self._element_by_id = None
 
@@ -194,6 +258,12 @@ class Sentence(object):
         self._elements.append(element)
         assert element.sentence is None, 'element in multiple sentences?'
         element.sentence = self
+        element.offset = self.next_offset
+        if element.is_word():
+            self.next_offset += len(element.form) + 1
+        else:
+            # multi-word token; don't shift position of next token
+            pass
         # reset cache (TODO: extend instead)
         self._element_by_id = None
 
@@ -215,11 +285,15 @@ class Sentence(object):
         """Return the length of the sentence text."""
         return len(self.text(use_tokens))
 
-    def get_element(self, id_):
-        """Return element by id."""
+    def element_by_id(self):
+        """Return mapping from id to element."""
         if self._element_by_id is None:
             self._element_by_id = { e.id: e for e in self._elements }
-        return self._element_by_id[id_]
+        return self._element_by_id
+
+    def get_element(self, id_):
+        """Return element by id."""
+        return self.element_by_id()[id_]
 
     def wipe_annotation(self):
         for e in self._elements:
@@ -266,8 +340,10 @@ class Sentence(object):
                     deps.append((w.id, deprel))
         return deps
 
-    def assign_offsets(self, use_tokens=False):
+    def assign_offsets(self, base_offset=None, use_tokens=False):
         """Assign offsets to sentence elements."""
+        if base_offset is not None:
+            self.base_offset = base_offset
         offset = self.base_offset
         if use_tokens:
             raise NotImplementedError('multi-word token text not supported.')
@@ -280,14 +356,76 @@ class Sentence(object):
                 if e.is_word():
                     offset += len(e.form) + 1
 
+    def to_brat_standoff(self):
+        """Return list of brat standoff annotations for the sentence."""
+        # Create mapping from ID to element.
+        annotations = []
+        for element in self._elements:
+            annotations.extend(element.to_brat_standoff(self.element_by_id()))
+        return annotations
+
     def __unicode__(self):
         element_unicode = [unicode(e) for e in self._elements]
         return '\n'.join(self.comments + element_unicode)+'\n'
 
-def read_conllu(source, filename=None):
-    '''Read CoNLL-U format, yielding Sentence objects.
+class Document(object):
+    def __init__(self, filename=None):
+        self._sentences = []
+        self.filename = filename
 
-    Note: incomplete implementation, lacks validation.'''
+    def append(self, sentence):
+        """Append sentence to document."""
+        self._sentences.append(sentence)
+
+    def empty(self):
+        return self._sentences == []
+
+    def words(self):
+        """Return a list of the words in the document."""
+        return [w for s in self.sentences() for w in s.words()]
+
+    def sentences(self):
+        """Return a list of the sentences in the document."""
+        return self._sentences
+
+    def text(self, use_tokens=False, element_separator=' ',
+             sentence_separator='\n'):
+        return sentence_separator.join(s.text(use_tokens, element_separator)
+                                       for s in self.sentences())
+
+    def to_brat_standoff(self):
+        """Return list of brat standoff annotations for the document."""
+        annotations = []
+        for sentence in self._sentences:
+            annotations.extend(sentence.to_brat_standoff())
+        return annotations
+
+def _file_name(file_like, default='document'):
+    """Return name of named file or file-like object, or default if not
+    available."""
+    # If given a string, assume that it's the name
+    if isinstance(file_like, basestring):
+        return file_like
+    try:
+        return file_like.name
+    except AttributeError:
+        return default
+
+def read_documents(source, filename=None):
+    """Read CoNLL-U format, yielding Document objects."""
+
+    if filename is None:
+        filename = _file_name(source)
+    current = Document(filename)
+    for sentence in read_conllu(source, filename):
+        # TODO: recognize and respect document boundaries in source data.
+        current.append(sentence)
+    yield current
+
+def read_conllu(source, filename=None):
+    """Read CoNLL-U format, yielding Sentence objects.
+
+    Note: incomplete implementation, lacks validation."""
 
     # If given a string, assume it's a file name, open and recurse.
     if isinstance(source, basestring):
@@ -296,17 +434,11 @@ def read_conllu(source, filename=None):
                 yield s
         return
 
-    # If no filename is provided, attempt to determine from source and
-    # fall back to a default.
     if filename is None:
-        try:
-            filename = source.name
-        except AttributeError:
-            filename = '<unknown>'
+        filename = _file_name(source)
 
-    # TODO: recognize and respect document boundaries in source data.
-    offset = 0
-    current = Sentence(filename, offset)
+    sent_num, offset = 1, 0
+    current = Sentence(sent_num, filename, offset)
     for ln, line in enumerate(source):
         line = line.rstrip('\n')
         if not line:
@@ -316,7 +448,8 @@ def read_conllu(source, filename=None):
                 yield current
             else:
                 raise FormatError('empty sentence', line, ln+1)
-            current = Sentence(filename, offset)
+            sent_num += 1
+            current = Sentence(sent_num, filename, offset)
         elif line[0] == '#':
             current.comments.append(line)
         else:
